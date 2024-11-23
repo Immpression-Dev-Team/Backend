@@ -1,30 +1,19 @@
-// Import the Express framework
 import express from 'express';
-
-// Import bcryptjs for password hashing and comparison
 import bcrypt from 'bcryptjs';
-
-// Import the Mongoose library for MongoDB
 import mongoose from 'mongoose';
-
-// Destructure the compare function from bcrypt
-const { compare } = bcrypt;
+import dotenv from 'dotenv';
+import cloudinary from 'cloudinary';
 
 // Import the user model
 import UserModel from '../../models/users.js';
 
 // Import utility functions for authentication
-import { setAuthCookies, generateAuthToken } from '../../utils/authUtils.js';
+import { setAuthCookies, generateAuthToken, isUserAuthorized } from '../../utils/authUtils.js';
 
-import { isUserAuthorized } from '../../utils/authUtils.js';
-
-// Import dotenv
-import dotenv from 'dotenv';
-// Load environment variables from the .env file
+// Load environment variables
 dotenv.config();
 
-import cloudinary from 'cloudinary';
-
+// Configure Cloudinary
 cloudinary.v2.config({
   cloud_name: process.env.CLOUDINARY_CLOUD,
   api_key: process.env.CLOUDINARY_API,
@@ -34,559 +23,127 @@ cloudinary.v2.config({
 // Create a new Express router
 const router = express.Router();
 
-// Route for user signup
-router.post('/signup', async (request, response) => {
+// User signup
+router.post('/users/signup', async (req, res) => {
   try {
-    const { name, email, password } = request.body;
+    const { name, email, password } = req.body;
 
-    const userExists = await UserModel.findOne({ email });
-
-    if (userExists) {
-      return response
-        .status(409)
-        .json({ success: false, error: 'User already exists' });
+    if (await UserModel.findOne({ email })) {
+      return res.status(409).json({ success: false, error: 'User already exists' });
     }
 
-    const newUser = await UserModel.create({
-      name,
-      email,
-      password,
-    });
-
-    console.log('New user created successfully');
-
-    response
-      .status(200)
-      .json({ success: true, message: 'Signup successful', user: newUser });
+    const newUser = await UserModel.create({ name, email, password });
+    res.status(201).json({ success: true, message: 'Signup successful', user: newUser });
   } catch (error) {
     if (error instanceof mongoose.Error.ValidationError) {
-      for (let field in error.errors) {
-        const message = error.errors[field].message;
-        return response.status(400).json({ success: false, message });
-      }
+      return res.status(400).json({ success: false, message: error.message });
     }
-
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Route for user login
-router.post('/login', async (request, response) => {
+// User login
+router.post('/users/login', async (req, res) => {
   try {
-    const { email, password } = request.body;
-
+    const { email, password } = req.body;
     if (!email || !password) {
-      return response
-        .status(400)
-        .json({ success: false, error: 'Email and password are required' });
+      return res.status(400).json({ success: false, error: 'Email and password are required' });
     }
 
     const user = await UserModel.findOne({ email }).select('+password');
-
-    if (!user) {
-      return response
-        .status(404)
-        .json({ success: false, error: 'User not found' });
-    }
-
-    const isPasswordCorrect = await compare(password, user.password);
-
-    if (!isPasswordCorrect) {
-      return response
-        .status(401)
-        .json({ success: false, error: 'Incorrect password' });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ success: false, error: 'Invalid email or password' });
     }
 
     const authToken = generateAuthToken(user._id);
-
-    setAuthCookies(response, authToken);
-
-    response.status(200).json({
-      success: true,
-      message: 'Login successful',
-      token: authToken,
-      user: { user },
-    });
+    setAuthCookies(res, authToken);
+    res.status(200).json({ success: true, token: authToken, user });
   } catch (error) {
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Route for user logout
-router.post('/logout', (request, response) => {
+// User logout
+router.post('/users/logout', (req, res) => {
   try {
-    setAuthCookies(response, '');
-
-    response
-      .status(200)
-      .json({ success: true, message: 'User logged out successfully' });
+    setAuthCookies(res, '');
+    res.status(200).json({ success: true, message: 'User logged out successfully' });
   } catch (error) {
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Endpoint to get the user's profile
-router.get('/get-profile', isUserAuthorized, async (request, response) => {
+// Get user profile
+router.get('/users/me', isUserAuthorized, async (req, res) => {
   try {
-    const userId = request.user._id; // Get the authenticated user's ID
-
-    // Find the user by their ID, select the necessary fields
-    const user = await UserModel.findById(userId, ['name', 'email', 'views']);
-
+    const user = await UserModel.findById(req.user._id, 'name email bio artistType profilePictureLink views');
     if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
-
-    response.status(200).json({
-      success: true,
-      user: {
-        name: user.name,
-        email: user.email,
-        views: user.views,
-      },
-    });
-  } catch (error) {
-    console.error('Error fetching profile:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Route to get all users' profile pictures, bio, and artist type
-router.get('/all-profile-pictures', async (request, response) => {
-  try {
-    // Find all users and select the necessary fields: name, email, profilePictureLink, bio, and artistType
-    const users = await UserModel.find(
-      {},
-      {
-        name: 1,
-        email: 1,
-        profilePictureLink: 1,
-        bio: 1,
-        artistType: 1,
-        userId: 1,
-      }
-    );
-
-    // Check if any users exist in the database
-    if (!users || users.length === 0) {
-      return response
-        .status(404)
-        .json({ success: false, error: 'No users found' });
-    }
-
-    // Filter out users who do not have a profile picture link (optional)
-    const usersWithProfilePictures = users.filter(
-      (user) => user.profilePictureLink
-    );
-
-    // Respond with the list of users and their profile picture links, bio, and artist type
-    response.status(200).json({
-      success: true,
-      users: usersWithProfilePictures,
-    });
+    res.status(200).json({ success: true, user });
   } catch (error) {
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Route for adding/updating profile picture
-router.post('/profile-picture', async (request, response) => {
+// Update user profile
+router.put('/users/me', isUserAuthorized, async (req, res) => {
   try {
-    const { userId, profilePictureLink } = request.body;
-    console.log(profilePictureLink);
-
-    if (!userId || !profilePictureLink) {
-      return response.status(400).json({
-        success: false,
-        error: 'User ID and profile picture link are required',
-      });
-    }
-
-    const user = await UserModel.findById(userId);
-
+    const updates = req.body;
+    const user = await UserModel.findByIdAndUpdate(req.user._id, updates, { new: true });
     if (!user) {
-      return response
-        .status(404)
-        .json({ success: false, error: 'User not found' });
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
-
-    // Update the user's profile picture link
-    user.profilePictureLink = profilePictureLink;
-    await user.save();
-
-    response.status(200).json({
-      success: true,
-      message: 'Profile picture updated successfully',
-      user,
-    });
+    res.status(200).json({ success: true, user });
   } catch (error) {
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Route to get the user's profile picture based on userId
-router.get('/profile-picture/:userId', async (request, response) => {
+// Increment view count
+router.patch('/users/me/views', isUserAuthorized, async (req, res) => {
   try {
-    const { userId } = request.params;
-
-    // Find the user by their userId
-    const user = await UserModel.findById(userId);
-
+    const user = await UserModel.findByIdAndUpdate(req.user._id, { $inc: { views: 1 } }, { new: true });
     if (!user) {
-      return response
-        .status(404)
-        .json({ success: false, error: 'User not found' });
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
-
-    // Check if the user has a profile picture link
-    if (!user.profilePictureLink) {
-      console.log('profile picture link not found');
-      return response
-        .status(404)
-        .json({ success: false, error: 'Profile picture not found' });
-    }
-
-    // Respond with the profile picture link
-    response.status(200).json({
-      success: true,
-      profilePictureLink: user.profilePictureLink,
-    });
+    res.status(200).json({ success: true, views: user.views });
   } catch (error) {
     console.error(error);
-    response
-      .status(500)
-      .json({ success: false, error: 'Internal Server Error' });
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
-// Route for updating profile picture
-router.put('/profile-picture', async (request, response) => {
-  try {
-    const { userId, profilePictureLink } = request.body;
-
-    // Check if userId and profilePictureLink are provided
-    if (!userId || !profilePictureLink) {
-      return response.status(400).json({
-        success: false,
-        error: 'User ID and profile picture link are required',
-      });
-    }
-
-    // Find the user by userId
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    // Update the user's profile picture link
-    user.profilePictureLink = profilePictureLink;
-    await user.save();
-
-    response.status(200).json({
-      success: true,
-      message: 'Profile picture updated successfully',
-      user,
-    });
-  } catch (error) {
-    console.error(error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Route for deleting profile picture
-// Update delete-profile-picture route
-router.post('/delete-profile-picture', async (req, res) => {
+// Delete profile picture
+router.delete('/users/me/profile-picture', isUserAuthorized, async (req, res) => {
   const { public_id } = req.body;
-  console.log(`DELETING`, public_id);
-
   try {
-    const result = await cloudinary.v2.api.delete_resources(
-      [`artists/${public_id}`],
-      {
-        type: 'upload',
-        resource_type: 'image',
-      }
-    );
-
+    const result = await cloudinary.v2.api.delete_resources([`artists/${public_id}`], { type: 'upload', resource_type: 'image' });
     if (result.deleted[public_id] === 'deleted') {
-      console.log(`Image ${public_id} deleted successfully`);
-      res.json({ success: true });
+      res.json({ success: true, message: 'Profile picture deleted successfully' });
+      res.json({ success: true, message: 'Profile picture deleted successfully' });
     } else {
-      res.status(500).json({
-        success: false,
-        message: 'Image not found or already deleted in Cloudinary',
-      });
+      res.status(500).json({ success: false, message: 'Image not found or already deleted in Cloudinary' });
     }
   } catch (error) {
     console.error('Error deleting image:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to delete image',
-      error,
-    });
+    res.status(500).json({ success: false, error: 'Failed to delete image' });
   }
 });
 
-// Endpoint to set or update the user's bio
-router.put('/set-bio', isUserAuthorized, async (request, response) => {
+// Get all users
+router.get('/users', async (req, res) => {
   try {
-    const { bio } = request.body;
-    const userId = request.user._id; // Retrieve the authenticated user's ID
-
-    // Check if the bio is provided
-    if (!bio) {
-      return response.status(400).json({
-        success: false,
-        error: 'Bio is required',
-      });
-    }
-
-    // Find the user by userId and update the bio
-    const user = await UserModel.findByIdAndUpdate(
-      userId,
-      { bio },
-      { new: true }
-    );
-
-    if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    response.status(200).json({
-      success: true,
-      message: 'Bio updated successfully',
-      bio: user.bio,
-    });
+    const users = await UserModel.find({}, 'name email profilePictureLink bio artistType views');
+    res.status(200).json({ success: true, users });
   } catch (error) {
-    console.error('Error updating bio:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Endpoint to get the user's bio
-router.get('/get-bio', isUserAuthorized, async (request, response) => {
-  try {
-    const userId = request.user._id; // Retrieve the authenticated user's ID
-
-    // Find the user by userId
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    response.status(200).json({
-      success: true,
-      bio: user.bio || 'No bio available',
-    });
-  } catch (error) {
-    console.error('Error fetching bio:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Endpoint to set or update the user's artist type
-router.put('/set-artist-type', isUserAuthorized, async (request, response) => {
-  try {
-    const { artistType } = request.body;
-    const userId = request.user._id; // Retrieve the authenticated user's ID
-
-    // Check if the artistType is provided
-    if (!artistType) {
-      return response.status(400).json({
-        success: false,
-        error: 'Artist type is required',
-      });
-    }
-
-    // Find the user by userId
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    // Update the user's artist type
-    user.artistType = artistType;
-    await user.save();
-
-    response.status(200).json({
-      success: true,
-      message: 'Artist type updated successfully',
-      artistType: user.artistType,
-    });
-  } catch (error) {
-    console.error('Error updating artist type:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Endpoint to get the user's artist type
-router.get('/get-artist-type', isUserAuthorized, async (request, response) => {
-  try {
-    const userId = request.user._id; // Retrieve the authenticated user's ID
-
-    // Find the user by userId
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return response.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    response.status(200).json({
-      success: true,
-      artistType: user.artistType,
-    });
-  } catch (error) {
-    console.error('Error fetching artist type:', error);
-    response.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-router.patch('/increment-views/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Validate the ID parameter
-    if (!id || typeof id !== 'string') {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid or missing user ID',
-      });
-    }
-
-    // Find user by ID and increment view count
-    const updatedUser = await UserModel.findByIdAndUpdate(
-      id,
-      { $inc: { views: 1 } },
-      { new: true, runValidators: true } // Return the updated document with validators
-    );
-
-    if (!updatedUser) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    // Return success response
-    res.status(200).json({
-      success: true,
-      message: 'View count incremented successfully',
-      user: {
-        id: updatedUser._id,
-        views: updatedUser.views,
-      },
-    });
-  } catch (error) {
-    console.error('Error incrementing views:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-router.get('/get-views', async (req, res) => {
-  try {
-    const userId = req.user.id; // Assuming your middleware sets req.user.id based on the token
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found',
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      views: user.views, // Return the views count from the user document
-    });
-  } catch (error) {
-    console.error('Error fetching views:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Internal Server Error',
-    });
-  }
-});
-
-// Endpoint to update accountType
-router.post('/accountType', isUserAuthorized, async (req, res) => {
-  const userId = req.user.id;
-  const { accountType } = req.body;
-  console.log('userId, accountType', userId, accountType);
-
-  try {
-    const user = await UserModel.findById(userId);
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    user.accountType = accountType;
-    await user.save();
-
-    res.status(200).json({ success: true, accountType });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update account type',
-      error,
-    });
+    console.error(error);
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
   }
 });
 
